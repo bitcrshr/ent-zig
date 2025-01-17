@@ -16,6 +16,8 @@ pub const Expr = union(enum) {
     // TODO! init fns should return Expr with heap-allocated values.
     // that means I'll have to refactor so that Expr itself can have
     // an allocator and a mutex. Same for P.
+    //
+    // Also! Should probably do an ARC for everything
 
     fn initP(p: P) Expr {
         return .{ .p = p };
