@@ -1,0 +1,44 @@
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs: 
+  deploy_test_coverage:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+      - name: Setup Zig Compiler
+        uses: mlugg/setup-zig@v1.2.1
+        with:
+          version: 0.13.0
+      - name: Run tests & Generate Code Coverage
+        run: zig build test
+      - name: Upload Coverage Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './kcov-output'
+      - name: Deploy to Github Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+      
