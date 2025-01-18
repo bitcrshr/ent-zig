@@ -38,9 +38,9 @@ jobs:
           sudo chmod +x codecov ; \
           curl -Os https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz ; \
           tar xf ./zig-linux-x86_64-0.13.0.tar.xz ; \
-      - name: Install xz-utils
+      - name: Install GH dependencies
         if: ${{ !env.ACT }}
-        run: apt-get update && apt-get install xz-utils -y
+        run: apt-get update && apt-get install xz-utils git -y
       - name: Setup Zig Compiler
         uses: mlugg/setup-zig@v1.2.1
         if: ${{ !env.ACT }}          
