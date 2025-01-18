@@ -29,6 +29,86 @@ const PImpl = union(enum) {
 p: PImpl,
 alloc: Allocator,
 
+pub fn toExpr(self: P, alloc: Allocator) Allocator.Error!Expr {
+    switch (self.p) {
+        inline .Unary => |unary| {
+            const u = try unary.clone(alloc);
+            self.deinit();
+
+            return Expr{
+                .expr = .{
+                    .P = .{
+                        .p = .{ .Unary = u },
+                        .alloc = alloc,
+                    },
+                },
+                .alloc = alloc,
+            };
+        },
+
+        inline .Binary => |binary| {
+            const b = try binary.clone(alloc);
+            self.deinit();
+
+            return Expr{
+                .expr = .{
+                    .P = .{
+                        .p = .{ .Binary = b },
+                        .alloc = alloc,
+                    },
+                },
+                .alloc = alloc,
+            };
+        },
+
+        inline .Nary => |nary| {
+            const n = try nary.clone(alloc);
+            self.deinit();
+
+            return Expr{
+                .expr = .{
+                    .P = .{
+                        .p = .{ .Nary = n },
+                        .alloc = alloc,
+                    },
+                },
+                .alloc = alloc,
+            };
+        },
+
+        inline .Call => |call| {
+            const c = try call.clone(alloc);
+            self.deinit();
+
+            return Expr{
+                .expr = .{
+                    .P = .{
+                        .p = .{ .Call = c },
+                        .alloc = alloc,
+                    },
+                },
+                .alloc = alloc,
+            };
+        },
+    }
+}
+
+test "P.toExpr" {
+    const alloc = std.testing.allocator;
+    const eqStr = std.testing.expectEqualStrings;
+
+    const unary = try initUnary(alloc, .Not, try Expr.initValue(alloc, null));
+    errdefer unary.deinit();
+    const unaryExpr = try unary.toExpr(alloc);
+    defer unaryExpr.deinit();
+
+    const expected = "!(null)";
+    const got = try unaryExpr.toString(alloc);
+    defer alloc.free(got);
+
+    try eqStr(expected, got);
+}
+
 pub fn clone(self: *const P, alloc: Allocator) Allocator.Error!P {
     const impl: PImpl = switch (self.p) {
         inline .Unary => |unary| .{ .Unary = try unary.clone(alloc) },
@@ -79,7 +159,7 @@ pub fn initCall(alloc: Allocator, func: Func, exprs: anytype) Allocator.Error!P 
 
     call.* = try Call.init(alloc, func, exprs);
 
-    return .{ .p = .{ .Call = call } };
+    return .{ .p = .{ .Call = call }, .alloc = alloc };
 }
 
 pub fn toString(self: P, alloc: Allocator) Allocator.Error![]u8 {
@@ -115,7 +195,7 @@ pub fn deinit(self: *const P) void {
     }
 }
 
-pub fn negate(self: P, alloc: Allocator) Allocator.Error![]u8 {
+pub fn negate(self: P, alloc: Allocator) Allocator.Error!P {
     return switch (self.p) {
         inline .Unary => |unary| unary.negate(alloc),
         inline .Binary => |binary| binary.negate(alloc),
