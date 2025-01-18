@@ -10,6 +10,7 @@ const Op = enums.Op;
 const Func = enums.Func;
 
 const Expr = @import("./Expr.zig");
+const P = @import("./P.zig");
 
 const Nary = @This();
 
@@ -240,4 +241,50 @@ test "Nary.clone" {
     try strEq(nary.xs[0].expr.Field.name, nary2.xs[0].expr.Field.name);
     try strEq(nary.xs[1].expr.Edge.name, nary2.xs[1].expr.Edge.name);
     try strEq(nary.xs[2].expr.Value.v, nary2.xs[2].expr.Value.v);
+}
+
+pub fn negate(self: *Nary, alloc: Allocator) Allocator.Error!P {
+    const nary = try self.clone(alloc);
+    errdefer alloc.destroy(nary);
+    errdefer nary.deinit();
+
+    const expr = Expr{
+        .alloc = alloc,
+        .expr = .{
+            .P = .{
+                .alloc = alloc,
+                .p = .{
+                    .Nary = nary,
+                },
+            },
+        },
+    };
+
+    const negated = try P.initUnary(alloc, .Not, expr);
+
+    return negated;
+}
+
+test "Nary.negate" {
+    const alloc = std.testing.allocator;
+    const strEq = std.testing.expectEqualStrings;
+
+    const x = try Expr.initField(alloc, "foo");
+    errdefer x.deinit();
+    const y = try Expr.initEdge(alloc, "bar");
+    errdefer y.deinit();
+    const z = try Expr.initValue(alloc, [_]i32{ 1, 2, 3, 4 });
+    errdefer z.deinit();
+
+    var nary = try init(alloc, .Or, .{ x, y, z });
+    defer nary.deinit();
+
+    var negated = try nary.negate(alloc);
+    defer negated.deinit();
+
+    const expected = "!((foo || bar || [1,2,3,4]))";
+    const got = try negated.toString(alloc);
+    defer alloc.free(got);
+
+    try strEq(expected, got);
 }

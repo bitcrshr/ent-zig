@@ -114,3 +114,12 @@ pub fn deinit(self: *const P) void {
         },
     }
 }
+
+pub fn negate(self: P, alloc: Allocator) Allocator.Error![]u8 {
+    return switch (self.p) {
+        inline .Unary => |unary| unary.negate(alloc),
+        inline .Binary => |binary| binary.negate(alloc),
+        inline .Nary => |nary| nary.negate(alloc),
+        inline .Call => |call| call.negate(alloc),
+    };
+}

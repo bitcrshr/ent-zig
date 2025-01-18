@@ -7,6 +7,7 @@ const Op = enums.Op;
 const Func = enums.Func;
 
 const Expr = @import("./Expr.zig");
+const P = @import("./P.zig");
 
 const Call = @This();
 
@@ -229,4 +230,50 @@ test "Call.clone" {
     try strEq(call.args[0].expr.Field.name, call2.args[0].expr.Field.name);
     try strEq(call.args[1].expr.Edge.name, call2.args[1].expr.Edge.name);
     try strEq(call.args[2].expr.Value.v, call2.args[2].expr.Value.v);
+}
+
+pub fn negate(self: *Call, alloc: Allocator) Allocator.Error!P {
+    const call = try self.clone(alloc);
+    errdefer alloc.destroy(call);
+    errdefer call.deinit();
+
+    const expr = Expr{
+        .alloc = alloc,
+        .expr = .{
+            .P = .{
+                .alloc = alloc,
+                .p = .{
+                    .Call = call,
+                },
+            },
+        },
+    };
+
+    const negated = try P.initUnary(alloc, .Not, expr);
+
+    return negated;
+}
+
+test "Call.negate" {
+    const alloc = std.testing.allocator;
+    const strEq = std.testing.expectEqualStrings;
+
+    const x = try Expr.initField(alloc, "foo");
+    errdefer x.deinit();
+    const y = try Expr.initEdge(alloc, "bar");
+    errdefer y.deinit();
+    const z = try Expr.initValue(alloc, [_]i32{ 1, 2, 3, 4 });
+    errdefer z.deinit();
+
+    var call = try init(alloc, .Contains, .{ x, y, z });
+    defer call.deinit();
+
+    var negated = try call.negate(alloc);
+    defer negated.deinit();
+
+    const expected = "!(contains(foo, bar, [1,2,3,4]))";
+    const got = try negated.toString(alloc);
+    defer alloc.free(got);
+
+    try strEq(expected, got);
 }

@@ -7,6 +7,7 @@ const Op = enums.Op;
 const Func = enums.Func;
 
 const Expr = @import("./Expr.zig");
+const P = @import("./P.zig");
 
 const Binary = @This();
 
@@ -169,4 +170,48 @@ test "Binary.clone" {
     try eq(std.meta.activeTag(binary.y.expr), std.meta.activeTag(binary2.y.expr));
     try strEq(binary.x.expr.Field.name, binary2.x.expr.Field.name);
     try strEq(binary.y.expr.Edge.name, binary2.y.expr.Edge.name);
+}
+
+pub fn negate(self: *Binary, alloc: Allocator) Allocator.Error!P {
+    const binary = try self.clone(alloc);
+    errdefer alloc.destroy(binary);
+    errdefer binary.deinit();
+
+    const expr = Expr{
+        .alloc = alloc,
+        .expr = .{
+            .P = .{
+                .alloc = alloc,
+                .p = .{
+                    .Binary = binary,
+                },
+            },
+        },
+    };
+
+    const negated = try P.initUnary(alloc, .Not, expr);
+
+    return negated;
+}
+
+test "Binary.negate" {
+    const alloc = std.testing.allocator;
+    const strEq = std.testing.expectEqualStrings;
+
+    const x = try Expr.initField(alloc, "foo");
+    errdefer x.deinit();
+    const y = try Expr.initEdge(alloc, "bar");
+    errdefer y.deinit();
+
+    var binary = init(.And, x, y);
+    defer binary.deinit();
+
+    var negated = try binary.negate(alloc);
+    defer negated.deinit();
+
+    const expected = "!(foo && bar)";
+    const got = try negated.toString(alloc);
+    defer alloc.free(got);
+
+    try strEq(expected, got);
 }

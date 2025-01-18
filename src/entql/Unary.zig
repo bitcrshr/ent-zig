@@ -7,6 +7,7 @@ const Op = enums.Op;
 const Func = enums.Func;
 
 const Expr = @import("./Expr.zig");
+const P = @import("./P.zig");
 
 const Unary = @This();
 
@@ -140,4 +141,43 @@ test "Unary.clone" {
     try eq(unary.op, unary2.op);
     try eq(std.meta.activeTag(unary.x.expr), std.meta.activeTag(unary2.x.expr));
     try strEq(unary.x.expr.Field.name, unary2.x.expr.Field.name);
+}
+
+pub fn negate(self: *Unary, alloc: Allocator) Allocator.Error!P {
+    const unary = try self.clone(alloc);
+    errdefer alloc.destroy(unary);
+    errdefer unary.deinit();
+
+    const expr = Expr{
+        .alloc = alloc,
+        .expr = .{
+            .P = .{
+                .alloc = alloc,
+                .p = .{
+                    .Unary = unary,
+                },
+            },
+        },
+    };
+
+    const negated = try P.initUnary(alloc, .Not, expr);
+
+    return negated;
+}
+
+test "Unary.negate" {
+    const alloc = std.testing.allocator;
+    const strEq = std.testing.expectEqualStrings;
+
+    var unary = init(Op.Not, try Expr.initField(alloc, "foo"));
+    defer unary.deinit();
+
+    var negated = try unary.negate(alloc);
+    defer negated.deinit();
+
+    const expected = "!(!(foo))";
+    const got = try negated.toString(alloc);
+    defer alloc.free(got);
+
+    try strEq(expected, got);
 }
