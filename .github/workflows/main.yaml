@@ -23,6 +23,9 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    container: 
+      image: kcov/kcov@latest
+      options: --security-opt seccomp=unconfined
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
@@ -38,7 +41,9 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: './kcov-output'
-      - name: Deploy to Github Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          directory: ./kcov-output/test
+          token: ${{ secrets.CODECOV_TOKEN }}
       
