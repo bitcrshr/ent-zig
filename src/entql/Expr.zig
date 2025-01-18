@@ -43,7 +43,7 @@ pub fn initField(alloc: Allocator, name: []const u8) Allocator.Error!Expr {
     const field = try alloc.create(Field);
     errdefer alloc.destroy(field);
 
-    field.* = .{ .name = name };
+    field.* = try Field.init(alloc, name);
 
     return .{
         .expr = .{ .Field = field },
@@ -55,7 +55,7 @@ pub fn initEdge(alloc: Allocator, name: []const u8) Allocator.Error!Expr {
     const edge = try alloc.create(Edge);
     errdefer alloc.destroy(edge);
 
-    edge.* = .{ .name = name };
+    edge.* = try Edge.init(alloc, name);
 
     return .{
         .expr = .{ .Edge = edge },
@@ -67,7 +67,7 @@ pub fn initValue(alloc: Allocator, v: anytype) Allocator.Error!Expr {
     const value = try alloc.create(Value);
     errdefer alloc.destroy(value);
 
-    value.* = Value.init(alloc, v);
+    value.* = try Value.init(alloc, v);
 
     return .{
         .expr = .{ .Value = value },
@@ -86,9 +86,27 @@ pub fn toString(self: Expr, alloc: Allocator) Allocator.Error![]u8 {
 
 pub fn deinit(self: Expr) void {
     switch (self.expr) {
-        inline .P => |p| p.deinit(),
-        inline .Field => |field| field.deinit(),
-        inline .Edge => |edge| edge.deinit(),
-        inline .Value => |value| value.deinit(),
+        inline .P => |p| {
+            var pm = p;
+            pm.deinit();
+        },
+
+        inline .Field => |field| {
+            var fm = field;
+            fm.deinit();
+            self.alloc.destroy(field);
+        },
+
+        inline .Edge => |edge| {
+            var em = edge;
+            em.deinit();
+            self.alloc.destroy(edge);
+        },
+
+        inline .Value => |value| {
+            var vm = value;
+            vm.deinit();
+            self.alloc.destroy(value);
+        },
     }
 }

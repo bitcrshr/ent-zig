@@ -31,10 +31,10 @@ alloc: Allocator,
 
 pub fn clone(self: *const P, alloc: Allocator) Allocator.Error!P {
     const impl: PImpl = switch (self.p) {
-        inline .Unary => |unary| try unary.clone(alloc),
-        inline .Binary => |binary| try binary.clone(alloc),
-        inline .Nary => |nary| try nary.clone(alloc),
-        inline .Call => |call| try call.clone(alloc),
+        inline .Unary => |unary| .{ .Unary = try unary.clone(alloc) },
+        inline .Binary => |binary| .{ .Binary = try binary.clone(alloc) },
+        inline .Nary => |nary| .{ .Nary = try nary.clone(alloc) },
+        inline .Call => |call| .{ .Call = try call.clone(alloc) },
     };
 
     return .{ .p = impl, .alloc = alloc };
@@ -44,7 +44,7 @@ pub fn initUnary(alloc: Allocator, op: Op, x: Expr) Allocator.Error!P {
     const unary = try alloc.create(Unary);
     errdefer alloc.destroy(unary);
 
-    unary.* = .{ .op = op, .x = x };
+    unary.* = Unary.init(op, x);
 
     return .{
         .p = .{ .Unary = unary },
@@ -56,7 +56,7 @@ pub fn initBinary(alloc: Allocator, op: Op, x: Expr, y: Expr) Allocator.Error!P 
     const binary = try alloc.create(Binary);
     errdefer alloc.destroy(binary);
 
-    binary.* = .{ .op = op, .x = x, .y = y };
+    binary.* = Binary.init(op, x, y);
 
     return .{
         .p = .{ .Binary = binary },
@@ -64,72 +64,20 @@ pub fn initBinary(alloc: Allocator, op: Op, x: Expr, y: Expr) Allocator.Error!P 
     };
 }
 
-pub fn initNary(alloc: Allocator, op: Op, xs: anytype) Allocator.Error!P {
+pub fn initNary(alloc: Allocator, op: Op, exprs: anytype) Allocator.Error!P {
     const nary = try alloc.create(Nary);
     errdefer alloc.destroy(nary);
 
-    comptime var exprs: [xs.len]Expr = undefined;
-    comptime {
-        const T = @TypeOf(xs);
-        const ti = @typeInfo(T);
-
-        if (ti != .Struct) {
-            @compileError("expected xs to be a tuple of Expr, but found " ++ @typeName(T) ++ " instead.");
-        }
-
-        if (!ti.Struct.is_tuple) {
-            @compileError("expected xs to be a tuple of Expr, but found " ++ @typeName(T) ++ " instead.");
-        }
-
-        assert(xs.len == ti.Struct.fields.len);
-
-        for (xs, 0..) |x, i| {
-            const field = ti.Struct.fields[i];
-
-            if (field.type != Expr) {
-                @compileError("expected every element in xs to be a Expr, but found " ++ @typeName(field.type) ++ " instead.");
-            }
-
-            exprs[i] = x;
-        }
-    }
-
-    nary.* = .{ .op = op, .xs = exprs };
+    nary.* = try Nary.init(alloc, op, exprs);
 
     return .{ .p = .{ .Nary = nary } };
 }
 
-pub fn initCall(alloc: Allocator, func: Func, args: anytype) Allocator.Error!P {
+pub fn initCall(alloc: Allocator, func: Func, exprs: anytype) Allocator.Error!P {
     const call = try alloc.create(Call);
     errdefer alloc.destroy(call);
 
-    comptime var exprs: [args.len]Expr = undefined;
-    comptime {
-        const T = @TypeOf(args);
-        const ti = @typeInfo(T);
-
-        if (ti != .Struct) {
-            @compileError("expected args to be a tuple of Expr, but found " ++ @typeName(T) ++ " instead.");
-        }
-
-        if (!ti.Struct.is_tuple) {
-            @compileError("expected args to be a tuple of Expr, but found " ++ @typeName(T) ++ " instead.");
-        }
-
-        assert(args.len == ti.Struct.fields.len);
-
-        for (args, 0..) |x, i| {
-            const field = ti.Struct.fields[i];
-
-            if (field.type != Expr) {
-                @compileError("expected every element in args to be a Expr, but found " ++ @typeName(field.type) ++ " instead.");
-            }
-
-            exprs[i] = x;
-        }
-    }
-
-    call.* = .{ .func = func, .args = exprs };
+    call.* = try Call.init(alloc, func, exprs);
 
     return .{ .p = .{ .Call = call } };
 }
@@ -145,9 +93,24 @@ pub fn toString(self: P, alloc: Allocator) Allocator.Error![]u8 {
 
 pub fn deinit(self: *const P) void {
     switch (self.p) {
-        inline .Unary => |unary| unary.deinit(),
-        inline .Binary => |binary| binary.deinit(),
-        inline .Nary => |nary| nary.deinit(),
-        inline .Call => |call| call.deinit(),
+        inline .Unary => |unary| {
+            unary.deinit();
+            self.alloc.destroy(unary);
+        },
+
+        inline .Binary => |binary| {
+            binary.deinit();
+            self.alloc.destroy(binary);
+        },
+
+        inline .Nary => |nary| {
+            nary.deinit();
+            self.alloc.destroy(nary);
+        },
+
+        inline .Call => |call| {
+            call.deinit();
+            self.alloc.destroy(call);
+        },
     }
 }

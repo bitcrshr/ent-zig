@@ -21,29 +21,44 @@ pub fn init(alloc: Allocator, v: anytype) Allocator.Error!Value {
     return .{ .v = x_str, .alloc = alloc };
 }
 
-pub fn toString(self: *const Value, alloc: Allocator) Allocator.Error![]u8 {
+pub fn toString(self: *Value, alloc: Allocator) Allocator.Error![]u8 {
+    self.mx.lock();
+    defer self.mx.unlock();
+
+    if (self.freed) {
+        @panic("called Value.toString after it was deinitialized");
+    }
+
     return alloc.dupe(u8, self.v);
 }
 
 pub fn deinit(self: *Value) void {
+    self.mx.lock();
+    defer self.mx.unlock();
+
     if (self.freed) {
         return;
     }
 
-    self.mx.lock();
     self.alloc.free(self.v);
     self.freed = true;
-    self.mx.unlock();
 }
 
-pub fn clone(self: *const Value, alloc: Allocator) Allocator.Error!*Value {
+pub fn clone(self: *Value, alloc: Allocator) Allocator.Error!*Value {
+    self.mx.lock();
+    defer self.mx.unlock();
+
+    if (self.freed) {
+        @panic("called Value.clone after it was deinitialized");
+    }
+
     const val = try alloc.create(Value);
     errdefer alloc.destroy(val);
 
-    const v = try self.toString(alloc);
+    const v = try alloc.dupe(u8, self.v);
     errdefer alloc.free(v);
 
-    val.* = .{ .v = v };
+    val.* = .{ .v = v, .alloc = alloc };
 
     return val;
 }
