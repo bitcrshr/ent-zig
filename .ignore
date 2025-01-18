@@ -1,3 +1,4 @@
 !.gitignore
 !.ignore
 !.github/
+!gh_secrets
