@@ -24,23 +24,17 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     container: 
-      image: kcov/kcov@latest
+      image: kcov/kcov:latest
       options: --security-opt seccomp=unconfined
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
       - name: Setup Zig Compiler
         uses: mlugg/setup-zig@v1.2.1
         with:
           version: 0.13.0
       - name: Run tests & Generate Code Coverage
-        run: zig build test && ls
-      - name: Upload Coverage Artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: './kcov-output'
+        run: zig build test
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
