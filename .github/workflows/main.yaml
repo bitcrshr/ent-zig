@@ -49,7 +49,7 @@ jobs:
       - name: Run tests & Generate Code Coverage
         run: ${{ env.ACT && './zig-linux-x86_64-0.13.0/zig' || 'zig' }} build cov
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v5.1.2
         with:
           binary: ${{ env.ACT && './codecov' || '' }}
           directory: ./kcov-output/test
