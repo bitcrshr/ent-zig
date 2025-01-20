@@ -1,112 +1,91 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const Mutex = std.Thread.Mutex;
+const assert = std.debug.assert;
 
 const enums = @import("./enums.zig");
+const util = @import("util");
+
 const Op = enums.Op;
 const Func = enums.Func;
 
-const P = @import("./P.zig");
-
-const Unary = @import("./Unary.zig");
 const Binary = @import("./Binary.zig");
-const Nary = @import("./Nary.zig");
-const Call = @import("./Call.zig");
-const Field = @import("./Field.zig");
-const Edge = @import("./Edge.zig");
-const Value = @import("./Value.zig");
 
-const Expr = @This();
+const Predicate = @import("./Predicate.zig");
 
-const ExprImpl = union(enum) {
-    P: P,
-    Field: *Field,
-    Edge: *Edge,
-    Value: *Value,
+const Self = @This();
+
+ptr: *anyopaque,
+vt: *const VTable,
+
+/// Only has an alloc when it is the parent. When it is the child,
+/// the parent will take the allocator.
+alloc: ?*util.EntAllocator,
+
+const VTable = struct {
+    toString: *const fn (*anyopaque, std.mem.Allocator) std.mem.Allocator.Error![]const u8,
+    deinit: *const fn (*anyopaque) void,
 };
 
-expr: ExprImpl,
-alloc: Allocator,
-
-pub fn clone(self: Expr, alloc: Allocator) Allocator.Error!Expr {
-    const impl: ExprImpl = switch (self.expr) {
-        inline .P => |p| .{ .P = try p.clone(alloc) },
-        inline .Field => |field| .{ .Field = try field.clone(alloc) },
-        inline .Edge => |edge| .{ .Edge = try edge.clone(alloc) },
-        inline .Value => |value| .{ .Value = try value.clone(alloc) },
-    };
-
-    return .{ .expr = impl, .alloc = alloc };
+/// Returns the string representation of this Expr, using the provided `Allocator`.
+pub fn toString(self: Self, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+    return self.vt.toString(self.ptr, alloc);
 }
 
-pub fn initField(alloc: Allocator, name: []const u8) Allocator.Error!Expr {
-    const field = try alloc.create(Field);
-    errdefer alloc.destroy(field);
-
-    field.* = try Field.init(alloc, name);
-
-    return .{
-        .expr = .{ .Field = field },
-        .alloc = alloc,
-    };
-}
-
-pub fn initEdge(alloc: Allocator, name: []const u8) Allocator.Error!Expr {
-    const edge = try alloc.create(Edge);
-    errdefer alloc.destroy(edge);
-
-    edge.* = try Edge.init(alloc, name);
-
-    return .{
-        .expr = .{ .Edge = edge },
-        .alloc = alloc,
-    };
-}
-
-pub fn initValue(alloc: Allocator, v: anytype) Allocator.Error!Expr {
-    const value = try alloc.create(Value);
-    errdefer alloc.destroy(value);
-
-    value.* = try Value.init(alloc, v);
-
-    return .{
-        .expr = .{ .Value = value },
-        .alloc = alloc,
-    };
-}
-
-pub fn toString(self: Expr, alloc: Allocator) Allocator.Error![]u8 {
-    return switch (self.expr) {
-        inline .P => |p| p.toString(alloc),
-        inline .Field => |field| field.toString(alloc),
-        inline .Edge => |edge| edge.toString(alloc),
-        inline .Value => |value| value.toString(alloc),
-    };
-}
-
-pub fn deinit(self: Expr) void {
-    switch (self.expr) {
-        inline .P => |p| {
-            var pm = p;
-            pm.deinit();
-        },
-
-        inline .Field => |field| {
-            var fm = field;
-            fm.deinit();
-            self.alloc.destroy(field);
-        },
-
-        inline .Edge => |edge| {
-            var em = edge;
-            em.deinit();
-            self.alloc.destroy(edge);
-        },
-
-        inline .Value => |value| {
-            var vm = value;
-            vm.deinit();
-            self.alloc.destroy(value);
-        },
+/// Frees all associated memory owned by this Expr (and its children).
+pub fn deinit(self: Self) void {
+    if (self.alloc == null) {
+        // I am a child, my parent is responsible for releasing my memory.
+        return;
     }
+
+    // I am the parent, and I am responsible for releasing my memory and that
+    // of my children.
+    self.vt.deinit(self.ptr);
+}
+
+pub fn @"and"(self: *Self, other: *Self) *Predicate {
+    const binary = Binary.init(.And, self, other);
+
+    return binary.pred();
+}
+
+pub fn @"or"(self: *Self, other: *Self) *Predicate {
+    const binary = Binary.init(.Or, self, other);
+
+    return binary.pred();
+}
+
+pub fn eq(self: *Self, other: *Self) *Predicate {
+    const binary = Binary.init(.Eq, self, other);
+
+    return binary.pred();
+}
+
+pub fn neq(self: *Self, other: *Self) *Predicate {
+    const binary = Binary.init(.Neq, self, other);
+
+    return binary.pred();
+}
+
+pub fn gt(self: *Self, other: *Self) *Predicate {
+    const binary = Binary.init(.Gt, self, other);
+
+    return binary.pred();
+}
+
+pub fn gte(self: *Self, other: *Self) *Predicate {
+    const binary = Binary.init(.Gte, self, other);
+
+    return binary.pred();
+}
+
+pub fn lt(self: *Self, other: *Self) *Predicate {
+    const binary = Binary.init(.Lt, self, other);
+
+    return binary.pred();
+}
+
+pub fn lte(self: *Self, other: *Self) *Predicate {
+    const binary = Binary.init(.Lte, self, other);
+
+    return binary.pred();
 }

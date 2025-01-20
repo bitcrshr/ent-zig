@@ -1,151 +1,99 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const Mutex = std.Thread.Mutex;
 
 const enums = @import("./enums.zig");
 const Op = enums.Op;
 const Func = enums.Func;
 
+const util = @import("util");
+const EntAllocator = util.EntAllocator;
+
 const Expr = @import("./Expr.zig");
 
-const Value = @This();
+const Self = @This();
 
-v: []const u8,
-alloc: Allocator,
-mx: Mutex = Mutex{},
-freed: bool = false,
+v: std.json.Value,
+json: []const u8,
+alloc: ?*EntAllocator,
 
-pub fn init(alloc: Allocator, v: anytype) Allocator.Error!Value {
-    const x_str = try std.json.stringifyAlloc(alloc, v, .{});
+pub fn init(alloc: *EntAllocator, v: anytype) !*Self {
+    const json = std.json.stringifyAlloc(
+        alloc.allocator(),
+        v,
+        .{},
+    ) catch unreachable;
 
-    return .{ .v = x_str, .alloc = alloc };
+    const value = std.json.parseFromSliceLeaky(
+        std.json.Value,
+        alloc.allocator(),
+        json,
+        .{},
+    ) catch |e| {
+        switch (e) {
+            error.OutOfMemory => unreachable,
+            inline else => return e,
+        }
+    };
+
+    const self = alloc.create(Self);
+    self.* = .{
+        .v = value,
+        .json = json,
+        .alloc = alloc,
+    };
+
+    return self;
 }
 
-pub fn toString(self: *Value, alloc: Allocator) Allocator.Error![]u8 {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
-        @panic("called Value.toString after it was deinitialized");
-    }
-
-    return alloc.dupe(u8, self.v);
+pub fn toString(self: *const Self, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+    return alloc.dupe(u8, self.json);
 }
 
-pub fn deinit(self: *Value) void {
-    self.mx.lock();
-    defer self.mx.unlock();
+pub fn expr(self: *Self) *Expr {
+    std.debug.assert(self.alloc != null);
 
-    if (self.freed) {
+    const Impl = struct {
+        pub fn toString(ptr: *anyopaque, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+            const v: *Self = @ptrCast(@alignCast(ptr));
+
+            return Self.toString(v, alloc);
+        }
+
+        pub fn deinit(ptr: *anyopaque) void {
+            const v: *Self = @ptrCast(@alignCast(ptr));
+
+            return Self.deinit(v);
+        }
+    };
+
+    // I am now the child, so I need to give my allocator to my parent.
+    const parent_expr = self.alloc.?.create(Expr);
+    parent_expr.* = .{
+        .ptr = self,
+        .alloc = self.alloc,
+        .vt = &.{
+            .toString = Impl.toString,
+            .deinit = Impl.deinit,
+        },
+    };
+    self.alloc = null;
+
+    return parent_expr;
+}
+
+pub fn deinit(self: *Self) void {
+    if (self.alloc == null) {
         return;
     }
 
-    self.alloc.free(self.v);
-    self.freed = true;
-}
-
-pub fn clone(self: *Value, alloc: Allocator) Allocator.Error!*Value {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
-        @panic("called Value.clone after it was deinitialized");
-    }
-
-    const val = try alloc.create(Value);
-    errdefer alloc.destroy(val);
-
-    const v = try alloc.dupe(u8, self.v);
-    errdefer alloc.free(v);
-
-    val.* = .{ .v = v, .alloc = alloc };
-
-    return val;
+    self.alloc.?.deinit();
 }
 
 test "Value" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-    const eq = testing.expectEqualStrings;
+    const v = try init(EntAllocator.init(std.testing.allocator, .{}), 42);
+    defer v.deinit();
 
-    var v_str = try Value.init(alloc, "foo");
-    defer v_str.deinit();
+    const v_str = try v.toString(std.testing.allocator);
+    defer std.testing.allocator.free(v_str);
 
-    var expected: []const u8 = "\"foo\"";
-    var got: []const u8 = try v_str.toString(alloc);
-    errdefer alloc.free(got);
-
-    try eq(expected, got);
-
-    alloc.free(got);
-
-    var v_int = try Value.init(alloc, 420);
-    defer v_int.deinit();
-
-    expected = "420";
-    got = try v_int.toString(alloc);
-
-    try eq(expected, got);
-
-    alloc.free(got);
-
-    var v_float = try Value.init(alloc, 420.69);
-    defer v_float.deinit();
-
-    expected = "4.2069e2";
-    got = try v_float.toString(alloc);
-
-    try eq(expected, got);
-
-    alloc.free(got);
-
-    var v_null = try Value.init(alloc, null);
-    defer v_null.deinit();
-
-    expected = "null";
-    got = try v_null.toString(alloc);
-
-    try eq(expected, got);
-
-    alloc.free(got);
-
-    var v_bool = try Value.init(alloc, true);
-    defer v_bool.deinit();
-
-    expected = "true";
-    got = try v_bool.toString(alloc);
-
-    try eq(expected, got);
-
-    alloc.free(got);
-
-    var v_arr = try Value.init(
-        alloc,
-        .{ 42, 6.9, true, "yoyoyo" },
-    );
-    defer v_arr.deinit();
-
-    expected =
-        \\[42,6.9e0,true,"yoyoyo"]
-    ;
-    got = try v_arr.toString(alloc);
-
-    try eq(expected, got);
-
-    alloc.free(got);
-
-    var v_obj = try Value.init(
-        alloc,
-        .{ .string = "heya", .int = 42, .float = 12.34, .null = null, .bool = true },
-    );
-    defer v_obj.deinit();
-
-    expected =
-        \\{"string":"heya","int":42,"float":1.234e1,"null":null,"bool":true}
-    ;
-    got = try v_obj.toString(alloc);
-
-    try eq(expected, got);
-
-    alloc.free(got);
+    try std.testing.expectEqualStrings("42", v_str);
 }

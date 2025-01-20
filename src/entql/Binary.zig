@@ -1,217 +1,181 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const Mutex = std.Thread.Mutex;
 
 const enums = @import("./enums.zig");
 const Op = enums.Op;
 const Func = enums.Func;
 
 const Expr = @import("./Expr.zig");
-const P = @import("./P.zig");
+const Predicate = @import("./Predicate.zig");
 
-const Binary = @This();
+const util = @import("util");
+const EntAllocator = util.EntAllocator;
+
+const Self = @This();
 
 op: Op,
-x: Expr,
-y: Expr,
-mx: Mutex = Mutex{},
-freed: bool = false,
+x: *Expr,
+y: *Expr,
+alloc: ?*EntAllocator,
 
-pub fn init(op: Op, x: Expr, y: Expr) Binary {
-    return .{ .op = op, .x = x, .y = y };
+pub fn init(op: Op, x: *Expr, y: *Expr) *Self {
+    std.debug.assert(x.alloc != null);
+    std.debug.assert(y.alloc != null);
+    std.debug.assert(x.alloc.? == y.alloc.?);
+
+    const alloc = x.alloc.?;
+    x.alloc = null;
+    y.alloc = null;
+    const self = alloc.create(Self);
+
+    self.* = .{
+        .op = op,
+        .x = x,
+        .y = y,
+        .alloc = alloc,
+    };
+
+    return self;
 }
 
-test "Binary.init" {
-    const alloc = std.testing.allocator;
-    const eqStr = std.testing.expectEqualStrings;
-    const eq = std.testing.expectEqual;
-
-    const x = try Expr.initField(alloc, "foo");
-    errdefer x.deinit();
-    const y = try Expr.initEdge(alloc, "bar");
-    errdefer y.deinit();
-
-    var binary = init(.Not, x, y);
-    defer binary.deinit();
-
-    try eq(.Not, binary.op);
-    try eqStr("foo", binary.x.expr.Field.name);
-    try eqStr("bar", binary.y.expr.Edge.name);
-}
-
-pub fn toString(self: *Binary, alloc: Allocator) Allocator.Error![]u8 {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
-        @panic("called Binary.toString after it was deinitialized");
-    }
-
-    const op_str = self.op.toString();
-    const x_str = try self.x.toString(alloc);
-    defer alloc.free(x_str);
-    const y_str = try self.y.toString(alloc);
-    defer alloc.free(y_str);
-
-    const buf = try alloc.alloc(u8, 2 + op_str.len + x_str.len + y_str.len);
-
-    _ = std.fmt.bufPrint(buf, "{s} {s} {s}", .{ x_str, op_str, y_str }) catch unreachable;
-
-    return buf;
-}
-
-test "Binary.toString" {
-    const alloc = std.testing.allocator;
-    const eq = std.testing.expectEqualStrings;
-
-    const x = try Expr.initField(alloc, "foo");
-    errdefer x.deinit();
-    const y = try Expr.initEdge(alloc, "bar");
-    errdefer y.deinit();
-
-    var binary = init(.And, x, y);
-    defer binary.deinit();
-
-    const expected = "foo && bar";
-    const got = try binary.toString(alloc);
-    defer alloc.free(got);
-
-    try eq(expected, got);
-}
-
-pub fn deinit(self: *Binary) void {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
+pub fn deinit(self: *Self) void {
+    if (self.alloc == null) {
         return;
     }
 
-    self.x.deinit();
-    self.y.deinit();
-    self.freed = true;
+    self.alloc.?.deinit();
 }
 
-test "Binary.deinit" {
-    const alloc = std.testing.allocator;
+pub fn expr(self: *Self) *Expr {
+    std.debug.assert(self.alloc != null);
 
-    const x = try Expr.initField(alloc, "foo");
-    errdefer x.deinit();
-    const y = try Expr.initEdge(alloc, "bar");
-    errdefer y.deinit();
+    const Impl = struct {
+        pub fn toString(ptr: *anyopaque, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+            const b: *Self = @ptrCast(@alignCast(ptr));
 
-    var binary = init(.Not, x, y);
+            return Self.toString(b, alloc);
+        }
 
-    const f = struct {
-        pub fn f(u: *Binary) void {
-            var xos = std.Random.DefaultPrng.init(blk: {
-                var seed: u64 = undefined;
-                std.posix.getrandom(std.mem.asBytes(&seed)) catch @panic("failed to get random seed");
-                break :blk seed;
-            });
-            const rng = xos.random();
+        pub fn deinit(ptr: *anyopaque) void {
+            const b: *Self = @ptrCast(@alignCast(ptr));
 
-            const ms = rng.uintLessThan(u64, 5000);
-
-            std.time.sleep(std.time.ns_per_ms * ms);
-            u.deinit();
+            return Self.deinit(b);
         }
     };
 
-    for (0..10) |_| {
-        const t = try std.Thread.spawn(.{}, f.f, .{&binary});
-        t.detach();
-    }
-
-    binary.deinit();
-}
-
-pub fn clone(self: *Binary, alloc: Allocator) Allocator.Error!*Binary {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
-        @panic("called Binary.clone after it was deinitialized");
-    }
-
-    const b = try alloc.create(Binary);
-    errdefer alloc.destroy(b);
-
-    const x = try self.x.clone(alloc);
-    errdefer x.deinit();
-
-    const y = try self.y.clone(alloc);
-    errdefer y.deinit();
-
-    b.* = .{ .op = self.op, .x = x, .y = y };
-
-    return b;
-}
-
-test "Binary.clone" {
-    const alloc = std.testing.allocator;
-    const strEq = std.testing.expectEqualStrings;
-    const eq = std.testing.expectEqual;
-
-    const x = try Expr.initField(alloc, "foo");
-    errdefer x.deinit();
-    const y = try Expr.initEdge(alloc, "bar");
-    errdefer y.deinit();
-
-    var binary = init(.Not, x, y);
-    defer binary.deinit();
-
-    var binary2 = try binary.clone(alloc);
-    defer alloc.destroy(binary2);
-    defer binary2.deinit();
-
-    try eq(binary.op, binary2.op);
-    try eq(std.meta.activeTag(binary.x.expr), std.meta.activeTag(binary2.x.expr));
-    try eq(std.meta.activeTag(binary.y.expr), std.meta.activeTag(binary2.y.expr));
-    try strEq(binary.x.expr.Field.name, binary2.x.expr.Field.name);
-    try strEq(binary.y.expr.Edge.name, binary2.y.expr.Edge.name);
-}
-
-pub fn negate(self: *Binary, alloc: Allocator) Allocator.Error!P {
-    const binary = try self.clone(alloc);
-    errdefer alloc.destroy(binary);
-    errdefer binary.deinit();
-
-    const expr = Expr{
-        .alloc = alloc,
-        .expr = .{
-            .P = .{
-                .alloc = alloc,
-                .p = .{
-                    .Binary = binary,
-                },
-            },
+    const parent_expr = self.alloc.?.create(Expr);
+    parent_expr.* = .{
+        .ptr = self,
+        .alloc = self.alloc,
+        .vt = &.{
+            .toString = Impl.toString,
+            .deinit = Impl.deinit,
         },
     };
+    self.alloc = null;
 
-    const negated = try P.initUnary(alloc, .Not, expr);
-
-    return negated;
+    return parent_expr;
 }
 
-test "Binary.negate" {
-    const alloc = std.testing.allocator;
-    const strEq = std.testing.expectEqualStrings;
+pub fn pred(self: *Self) *Predicate {
+    std.debug.assert(self.alloc != null);
 
-    const x = try Expr.initField(alloc, "foo");
-    errdefer x.deinit();
-    const y = try Expr.initEdge(alloc, "bar");
-    errdefer y.deinit();
+    const Impl = struct {
+        pub fn toString(ptr: *anyopaque, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+            const b: *Self = @ptrCast(@alignCast(ptr));
 
-    var binary = init(.And, x, y);
-    defer binary.deinit();
+            return Self.toString(b, alloc);
+        }
 
-    var negated = try binary.negate(alloc);
+        pub fn deinit(ptr: *anyopaque) void {
+            const b: *Self = @ptrCast(@alignCast(ptr));
+
+            return Self.deinit(b);
+        }
+
+        pub fn negate(ptr: *anyopaque, alloc: *EntAllocator) *Predicate {
+            const b: *Self = @ptrCast(@alignCast(ptr));
+
+            b.alloc = alloc;
+
+            return Self.negate(b);
+        }
+
+        pub fn expr(ptr: *anyopaque, alloc: *EntAllocator) *Expr {
+            const b: *Self = @ptrCast(@alignCast(ptr));
+
+            b.alloc = alloc;
+
+            return Self.expr(b);
+        }
+    };
+
+    const parent_pred = self.alloc.?.create(Predicate);
+    parent_pred.* = .{
+        .ptr = self,
+        .alloc = self.alloc,
+        .vt = &.{
+            .toString = Impl.toString,
+            .deinit = Impl.deinit,
+            .negate = Impl.negate,
+            .expr = Impl.expr,
+        },
+    };
+    self.alloc = null;
+
+    return parent_pred;
+}
+
+pub fn toString(self: *const Self, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+    const op_str = self.op.toString();
+
+    const x_str = try self.x.toString(alloc);
+    defer alloc.free(x_str);
+
+    const y_str = try self.y.toString(alloc);
+    defer alloc.free(y_str);
+
+    const buf = try alloc.alloc(
+        u8,
+        x_str.len + " ".len + op_str.len + " ".len + y_str.len,
+    );
+
+    return std.fmt.bufPrint(buf, "{s} {s} {s}", .{ x_str, op_str, y_str }) catch unreachable;
+}
+
+pub fn negate(self: *Self) *Predicate {
+    const Unary = @import("./Unary.zig");
+
+    const self_expr = self.expr();
+    const negated = Unary.init(.Not, self_expr);
+
+    return negated.pred();
+}
+
+test "Binary" {
+    const Edge = @import("./Edge.zig");
+    const Field = @import("./Field.zig");
+
+    const alloc = EntAllocator.init(std.testing.allocator, .{});
+
+    const edge = Edge.init(alloc, "foo");
+
+    const field = Field.init(alloc, "bar");
+
+    var binary = init(.NotIn, edge.expr(), field.expr());
+
+    var expected: []const u8 = "foo not in bar";
+    var got = try binary.toString(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(expected, got);
+
+    std.testing.allocator.free(got);
+
+    var negated = binary.negate();
     defer negated.deinit();
 
-    const expected = "!(foo && bar)";
-    const got = try negated.toString(alloc);
-    defer alloc.free(got);
+    expected = "!(foo not in bar)";
+    got = try negated.toString(std.testing.allocator);
+    defer std.testing.allocator.free(got);
 
-    try strEq(expected, got);
+    try std.testing.expectEqualStrings(expected, got);
 }

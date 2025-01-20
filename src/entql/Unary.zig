@@ -1,183 +1,164 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const Mutex = std.Thread.Mutex;
 
 const enums = @import("./enums.zig");
 const Op = enums.Op;
 const Func = enums.Func;
 
 const Expr = @import("./Expr.zig");
-const P = @import("./P.zig");
+const Predicate = @import("./Predicate.zig");
 
-const Unary = @This();
+const util = @import("util");
+const EntAllocator = util.EntAllocator;
+
+const Self = @This();
 
 op: Op,
-x: Expr,
-mx: Mutex = Mutex{},
-freed: bool = false,
+x: *Expr,
 
-pub fn init(op: Op, x: Expr) Unary {
-    return .{ .op = op, .x = x };
+/// Only has an alloc when it is the parent. When it is the child,
+/// the parent will take the allocator.
+alloc: ?*EntAllocator,
+
+pub fn init(op: Op, x: *Expr) *Self {
+    std.debug.assert(x.alloc != null);
+
+    // I am now the parent, so I will thake the child's allocator.
+    const alloc = x.alloc.?;
+    x.alloc = null;
+
+    const self = alloc.create(Self);
+    self.* = .{ .op = op, .x = x, .alloc = alloc };
+
+    return self;
 }
 
-test "Unary.init" {
-    const alloc = std.testing.allocator;
-    const eqStr = std.testing.expectEqualStrings;
-    const eq = std.testing.expectEqual;
-
-    var unary = init(.Not, try Expr.initField(alloc, "foo"));
-    defer unary.deinit();
-
-    try eq(.Not, unary.op);
-    try eqStr("foo", unary.x.expr.Field.name);
-}
-
-pub fn toString(self: *Unary, alloc: Allocator) Allocator.Error![]u8 {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
-        @panic("called Unary.toString after it was deinitialized");
-    }
-
-    const op_str = self.op.toString();
-    const x_str = try self.x.toString(alloc);
-    defer alloc.free(x_str);
-
-    const buf = try alloc.alloc(u8, 2 + op_str.len + x_str.len);
-    errdefer buf.deinit();
-
-    _ = std.fmt.bufPrint(buf, "{s}({s})", .{ op_str, x_str }) catch unreachable;
-
-    return buf;
-}
-
-test "Unary.toString" {
-    const alloc = std.testing.allocator;
-    const eq = std.testing.expectEqualStrings;
-
-    var unary = init(Op.Not, try Expr.initField(alloc, "foo"));
-    defer unary.deinit();
-
-    const expected = "!(foo)";
-    const got = try unary.toString(alloc);
-    defer alloc.free(got);
-
-    try eq(expected, got);
-}
-
-pub fn deinit(self: *Unary) void {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
+pub fn deinit(self: *Self) void {
+    if (self.alloc == null) {
+        // I am a child, my parent is responsible for releasing my memory.
         return;
     }
 
-    self.x.deinit();
-    self.freed = true;
+    // I am the parent, and I am responsible for releasing my memory and that
+    // of my children.
+    self.alloc.?.deinit();
 }
 
-test "Unary.deinit" {
-    const alloc = std.testing.allocator;
+pub fn expr(self: *Self) *Expr {
+    std.debug.assert(self.alloc != null);
 
-    var unary = init(Op.Not, try Expr.initField(alloc, "foo"));
+    const Impl = struct {
+        pub fn toString(ptr: *anyopaque, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+            const u: *Self = @ptrCast(@alignCast(ptr));
 
-    const f = struct {
-        pub fn f(u: *Unary) void {
-            var xos = std.Random.DefaultPrng.init(blk: {
-                var seed: u64 = undefined;
-                std.posix.getrandom(std.mem.asBytes(&seed)) catch @panic("failed to get random seed");
-                break :blk seed;
-            });
-            const rng = xos.random();
+            return Self.toString(u, alloc);
+        }
 
-            const ms = rng.uintLessThan(u64, 5000);
+        pub fn deinit(ptr: *anyopaque) void {
+            const u: *Self = @ptrCast(@alignCast(ptr));
 
-            std.time.sleep(std.time.ns_per_ms * ms);
-            u.deinit();
+            return Self.deinit(u);
         }
     };
 
-    for (0..10) |_| {
-        const t = try std.Thread.spawn(.{}, f.f, .{&unary});
-        t.detach();
-    }
-
-    unary.deinit();
-}
-
-pub fn clone(self: *Unary, alloc: Allocator) Allocator.Error!*Unary {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
-        @panic("called Unary.clone after it was deinitialized");
-    }
-
-    const u = try alloc.create(Unary);
-    errdefer alloc.destroy(u);
-
-    const x = try self.x.clone(alloc);
-    errdefer alloc.destroy(x);
-
-    u.* = .{ .x = x, .op = self.op };
-
-    return u;
-}
-
-test "Unary.clone" {
-    const alloc = std.testing.allocator;
-    const strEq = std.testing.expectEqualStrings;
-    const eq = std.testing.expectEqual;
-
-    var unary = init(Op.Not, try Expr.initField(alloc, "foo"));
-    defer unary.deinit();
-
-    var unary2 = try unary.clone(alloc);
-    defer alloc.destroy(unary2);
-    defer unary2.deinit();
-
-    try eq(unary.op, unary2.op);
-    try eq(std.meta.activeTag(unary.x.expr), std.meta.activeTag(unary2.x.expr));
-    try strEq(unary.x.expr.Field.name, unary2.x.expr.Field.name);
-}
-
-pub fn negate(self: *Unary, alloc: Allocator) Allocator.Error!P {
-    const unary = try self.clone(alloc);
-    errdefer alloc.destroy(unary);
-    errdefer unary.deinit();
-
-    const expr = Expr{
-        .alloc = alloc,
-        .expr = .{
-            .P = .{
-                .alloc = alloc,
-                .p = .{
-                    .Unary = unary,
-                },
-            },
+    // I am now the child, so I need to give my allocator to my parent.
+    const parent_expr = self.alloc.?.create(Expr);
+    parent_expr.* = .{
+        .ptr = self,
+        .alloc = self.alloc,
+        .vt = &.{
+            .toString = Impl.toString,
+            .deinit = Impl.deinit,
         },
     };
+    self.alloc = null;
 
-    const negated = try P.initUnary(alloc, .Not, expr);
-
-    return negated;
+    return parent_expr;
 }
 
-test "Unary.negate" {
-    const alloc = std.testing.allocator;
-    const strEq = std.testing.expectEqualStrings;
+pub fn pred(self: *Self) *Predicate {
+    const Impl = struct {
+        pub fn toString(ptr: *anyopaque, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+            const u: *Self = @ptrCast(@alignCast(ptr));
 
-    var unary = init(Op.Not, try Expr.initField(alloc, "foo"));
+            return u.toString(alloc);
+        }
+
+        pub fn deinit(ptr: *anyopaque) void {
+            const u: *Self = @ptrCast(@alignCast(ptr));
+
+            return u.deinit();
+        }
+
+        pub fn negate(ptr: *anyopaque, alloc: *EntAllocator) *Predicate {
+            const u: *Self = @ptrCast(@alignCast(ptr));
+
+            u.alloc = alloc;
+
+            return u.negate();
+        }
+
+        pub fn expr(ptr: *anyopaque, alloc: *EntAllocator) *Expr {
+            const u: *Self = @ptrCast(@alignCast(ptr));
+
+            u.alloc = alloc;
+
+            return u.expr();
+        }
+    };
+
+    // I am now the child, so I need to give my allocator to my parent.
+    const parent_pred = self.alloc.?.create(Predicate);
+    parent_pred.* = .{
+        .ptr = self,
+        .alloc = self.alloc,
+        .vt = &.{
+            .toString = Impl.toString,
+            .deinit = Impl.deinit,
+            .negate = Impl.negate,
+            .expr = Impl.expr,
+        },
+    };
+    self.alloc = null;
+
+    return parent_pred;
+}
+
+pub fn toString(self: *const Self, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+    const op_str = self.op.toString();
+
+    const x_str = try self.x.toString(alloc);
+    defer alloc.free(x_str);
+
+    const buf = try alloc.alloc(u8, op_str.len + "(".len + x_str.len + ")".len);
+    errdefer alloc.free(buf);
+
+    return std.fmt.bufPrint(buf, "{s}({s})", .{ op_str, x_str }) catch unreachable;
+}
+
+pub fn negate(self: *Self) *Predicate {
+    // I give my alloc to the Expr
+    const self_expr = self.expr();
+
+    // self_expr gives its alloc to a new Unary
+    const negated = init(.Not, self_expr);
+
+    // negated gives its alloc to the Predicate
+    return negated.pred();
+}
+
+test "Unary" {
+    const Value = @import("./Value.zig");
+
+    const alloc = EntAllocator.init(std.testing.allocator, .{});
+
+    const v = try Value.init(alloc, 42);
+
+    var unary = init(.Not, v.expr());
     defer unary.deinit();
 
-    var negated = try unary.negate(alloc);
-    defer negated.deinit();
+    const expected = "!(42)";
+    const got = try unary.toString(std.testing.allocator);
+    defer std.testing.allocator.free(got);
 
-    const expected = "!(!(foo))";
-    const got = try negated.toString(alloc);
-    defer alloc.free(got);
-
-    try strEq(expected, got);
+    try std.testing.expectEqualStrings(expected, got);
 }

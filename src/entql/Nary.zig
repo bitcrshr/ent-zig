@@ -1,87 +1,84 @@
-//! A Nary represents an n-ary expression. All methods are thread-safe.
-
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const Mutex = std.Thread.Mutex;
-const assert = std.debug.assert;
 
 const enums = @import("./enums.zig");
 const Op = enums.Op;
 const Func = enums.Func;
 
 const Expr = @import("./Expr.zig");
-const P = @import("./P.zig");
+const Predicate = @import("./Predicate.zig");
 
-const Nary = @This();
+const util = @import("util");
+const EntAllocator = util.EntAllocator;
+
+const Self = @This();
 
 op: Op,
-xs: []Expr,
-alloc: Allocator,
-mx: Mutex = Mutex{},
-freed: bool = false,
+xs: []*Expr,
+alloc: ?*EntAllocator,
 
-pub fn init(alloc: Allocator, op: Op, exprs: anytype) Allocator.Error!Nary {
+pub fn init(op: Op, xs: anytype) *Self {
     comptime {
-        const T = @TypeOf(exprs);
+        const T = @TypeOf(xs);
         const ti = @typeInfo(T);
 
         if (ti != .Struct) {
-            @compileError("expected exprs to be a tuple of Expr, but found " ++ @typeName(T) ++ " instead.");
+            @compileError("expected xs to be a tuple of *Expr, but found " ++ @typeName(T) ++ " instead.");
         }
 
         if (!ti.Struct.is_tuple) {
-            @compileError("expected exprs to be a tuple of Expr, but found " ++ @typeName(T) ++ " instead.");
+            @compileError("expected xs to be a tuple of *Expr, but found " ++ @typeName(T) ++ " instead.");
+        }
+
+        if (ti.Struct.fields.len == 0) {
+            @compileError("Nary requires at least one *Expr to be passed in.");
         }
 
         for (ti.Struct.fields) |field| {
-            if (field.type != Expr) {
-                @compileError("expected every element in exprs to be a Expr, but found " ++ @typeName(field.type) ++ " instead.");
+            if (field.type != *Expr) {
+                @compileError("expected every element in xs to be a *Expr, but found " ++ @typeName(field.type) ++ " instead.");
             }
         }
     }
 
-    const xs = try alloc.alloc(Expr, exprs.len);
-    errdefer alloc.free(xs);
+    std.debug.assert(xs[0].alloc != null);
 
-    inline for (exprs, 0..) |x, i| {
-        xs[i] = x;
+    var alloc: *EntAllocator = xs[0].alloc.?;
+    inline for (xs) |x| {
+        std.debug.assert(x.alloc == alloc);
+
+        x.alloc = null;
     }
 
-    return .{ .op = op, .xs = xs, .alloc = alloc };
-}
+    const exprs = alloc.alloc(*Expr, xs.len);
 
-test "Nary.init" {
-    const alloc = std.testing.allocator;
-    const eqStr = std.testing.expectEqualStrings;
-    const eq = std.testing.expectEqual;
-
-    const x = try Expr.initField(alloc, "foo");
-    errdefer x.deinit();
-    const y = try Expr.initEdge(alloc, "bar");
-    errdefer y.deinit();
-    const z = try Expr.initValue(alloc, [_]i32{ 3, 6, 9 });
-    errdefer z.deinit();
-
-    var nary = try init(alloc, .Or, .{ x, y, z });
-    defer nary.deinit();
-
-    try eq(.Or, nary.op);
-    try eq(3, nary.xs.len);
-    try eqStr("foo", nary.xs[0].expr.Field.name);
-    try eqStr("bar", nary.xs[1].expr.Edge.name);
-    try eqStr("[3,6,9]", nary.xs[2].expr.Value.v);
-}
-
-/// `Nary.toString` gives the string representation of itself. Caller owns the
-/// memory of the returned string. Will cause a panic if called after `Nary.deinit()`.
-pub fn toString(self: *Nary, alloc: Allocator) Allocator.Error![]u8 {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
-        @panic("called Nary.toString after it was deinitialized");
+    inline for (xs, 0..) |x, i| {
+        exprs[i] = x;
     }
 
+    const self = alloc.create(Self);
+    self.* = .{ .op = op, .xs = exprs, .alloc = alloc };
+
+    return self;
+}
+
+pub fn deinit(self: *Self) void {
+    if (self.alloc == null) {
+        return;
+    }
+
+    self.alloc.?.deinit();
+}
+
+pub fn negate(self: *Self) *Predicate {
+    const Unary = @import("./Unary.zig");
+
+    const self_expr = self.expr();
+    const negated = Unary.init(.Not, self_expr);
+
+    return negated.pred();
+}
+
+pub fn toString(self: *Self, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
     const op_str = self.op.toString();
 
     var al = std.ArrayList(u8).init(alloc);
@@ -107,184 +104,112 @@ pub fn toString(self: *Nary, alloc: Allocator) Allocator.Error![]u8 {
     return al.toOwnedSlice();
 }
 
-test "Nary.toString" {
-    const alloc = std.testing.allocator;
-    const eq = std.testing.expectEqualStrings;
+pub fn expr(self: *Self) *Expr {
+    std.debug.assert(self.alloc != null);
 
-    const x = try Expr.initField(alloc, "foo");
-    errdefer x.deinit();
-    const y = try Expr.initEdge(alloc, "bar");
-    errdefer y.deinit();
-    const z = try Expr.initValue(alloc, [_]i32{ 3, 6, 9 });
-    errdefer z.deinit();
+    const Impl = struct {
+        pub fn toString(ptr: *anyopaque, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+            const n: *Self = @ptrCast(@alignCast(ptr));
 
-    var nary = try init(alloc, .And, .{ x, y, z });
-    defer nary.deinit();
+            return Self.toString(n, alloc);
+        }
 
-    const expected = "(foo && bar && [3,6,9])";
-    const got = try nary.toString(alloc);
-    defer alloc.free(got);
+        pub fn deinit(ptr: *anyopaque) void {
+            const n: *Self = @ptrCast(@alignCast(ptr));
 
-    try eq(expected, got);
-}
-
-// `Nary.deinit` frees all the memory it owns (including any children's memory).
-// It is safe to call in multiple threads and/or multiple times. Does not free the
-// memory the `Nary` itself occupies.
-pub fn deinit(self: *Nary) void {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
-        return;
-    }
-
-    for (self.xs) |x| {
-        x.deinit();
-    }
-
-    self.alloc.free(self.xs);
-    self.freed = true;
-}
-
-test "Nary.deinit" {
-    const alloc = std.testing.allocator;
-
-    const x = try Expr.initField(alloc, "foo");
-    errdefer x.deinit();
-    const y = try Expr.initEdge(alloc, "bar");
-    errdefer y.deinit();
-    const z = try Expr.initValue(alloc, [_]i32{ 3, 6, 9 });
-    errdefer z.deinit();
-
-    var nary = try init(alloc, .And, .{ x, y, z });
-    defer nary.deinit();
-
-    const f = struct {
-        pub fn f(u: *Nary) void {
-            var xos = std.Random.DefaultPrng.init(blk: {
-                var seed: u64 = undefined;
-                std.posix.getrandom(std.mem.asBytes(&seed)) catch @panic("failed to get random seed");
-                break :blk seed;
-            });
-            const rng = xos.random();
-
-            const ms = rng.uintLessThan(u64, 5000);
-
-            std.time.sleep(std.time.ns_per_ms * ms);
-            u.deinit();
+            return Self.deinit(n);
         }
     };
 
-    for (0..10) |_| {
-        const t = try std.Thread.spawn(.{}, f.f, .{&nary});
-        t.detach();
-    }
-
-    nary.deinit();
-}
-
-// `Nary.clone` creates a copy of iteself using `alloc`. Caller is responsible
-// for freeing the memory of the clone.
-pub fn clone(self: *Nary, alloc: Allocator) Allocator.Error!*Nary {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
-        @panic("called Nary.clone after it was deinitialized");
-    }
-
-    const n = try alloc.create(Nary);
-    errdefer alloc.destroy(n);
-
-    var x_clones = try alloc.alloc(Expr, self.xs.len);
-    errdefer alloc.free(x_clones);
-
-    for (self.xs, 0..) |x, i| {
-        x_clones[i] = try x.clone(alloc);
-        errdefer alloc.destroy(x_clones[i]);
-    }
-
-    n.* = .{
-        .op = self.op,
-        .xs = x_clones,
-        .alloc = alloc,
-    };
-
-    return n;
-}
-
-test "Nary.clone" {
-    const alloc = std.testing.allocator;
-    const strEq = std.testing.expectEqualStrings;
-    const eq = std.testing.expectEqual;
-
-    const x = try Expr.initField(alloc, "foo");
-    errdefer x.deinit();
-    const y = try Expr.initEdge(alloc, "bar");
-    errdefer y.deinit();
-    const z = try Expr.initValue(alloc, [_]i32{ 3, 6, 9 });
-    errdefer z.deinit();
-
-    var nary = try init(alloc, .And, .{ x, y, z });
-    defer nary.deinit();
-
-    var nary2 = try nary.clone(alloc);
-    defer alloc.destroy(nary2);
-    defer nary2.deinit();
-
-    try eq(nary.op, nary2.op);
-    try eq(3, nary2.xs.len);
-    try eq(std.meta.activeTag(nary.xs[0].expr), std.meta.activeTag(nary2.xs[0].expr));
-    try eq(std.meta.activeTag(nary.xs[1].expr), std.meta.activeTag(nary2.xs[1].expr));
-    try eq(std.meta.activeTag(nary.xs[2].expr), std.meta.activeTag(nary2.xs[2].expr));
-    try strEq(nary.xs[0].expr.Field.name, nary2.xs[0].expr.Field.name);
-    try strEq(nary.xs[1].expr.Edge.name, nary2.xs[1].expr.Edge.name);
-    try strEq(nary.xs[2].expr.Value.v, nary2.xs[2].expr.Value.v);
-}
-
-pub fn negate(self: *Nary, alloc: Allocator) Allocator.Error!P {
-    const nary = try self.clone(alloc);
-    errdefer alloc.destroy(nary);
-    errdefer nary.deinit();
-
-    const expr = Expr{
-        .alloc = alloc,
-        .expr = .{
-            .P = .{
-                .alloc = alloc,
-                .p = .{
-                    .Nary = nary,
-                },
-            },
+    const parent_expr = self.alloc.?.create(Expr);
+    parent_expr.* = .{
+        .ptr = self,
+        .alloc = self.alloc,
+        .vt = &.{
+            .toString = Impl.toString,
+            .deinit = Impl.deinit,
         },
     };
+    self.alloc = null;
 
-    const negated = try P.initUnary(alloc, .Not, expr);
-
-    return negated;
+    return parent_expr;
 }
 
-test "Nary.negate" {
-    const alloc = std.testing.allocator;
-    const strEq = std.testing.expectEqualStrings;
+pub fn pred(self: *Self) *Predicate {
+    std.debug.assert(self.alloc != null);
 
-    const x = try Expr.initField(alloc, "foo");
-    errdefer x.deinit();
-    const y = try Expr.initEdge(alloc, "bar");
-    errdefer y.deinit();
-    const z = try Expr.initValue(alloc, [_]i32{ 1, 2, 3, 4 });
-    errdefer z.deinit();
+    const Impl = struct {
+        pub fn toString(ptr: *anyopaque, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+            const n: *Self = @ptrCast(@alignCast(ptr));
 
-    var nary = try init(alloc, .Or, .{ x, y, z });
-    defer nary.deinit();
+            return n.toString(alloc);
+        }
 
-    var negated = try nary.negate(alloc);
+        pub fn deinit(ptr: *anyopaque) void {
+            const n: *Self = @ptrCast(@alignCast(ptr));
+
+            return n.deinit();
+        }
+
+        pub fn negate(ptr: *anyopaque, alloc: *EntAllocator) *Predicate {
+            const n: *Self = @ptrCast(@alignCast(ptr));
+
+            n.alloc = alloc;
+
+            return n.negate();
+        }
+
+        pub fn expr(ptr: *anyopaque, alloc: *EntAllocator) *Expr {
+            const n: *Self = @ptrCast(@alignCast(ptr));
+
+            n.alloc = alloc;
+
+            return n.expr();
+        }
+    };
+
+    const parent_pred = self.alloc.?.create(Predicate);
+    parent_pred.* = .{
+        .ptr = self,
+        .alloc = self.alloc,
+        .vt = &.{
+            .toString = Impl.toString,
+            .deinit = Impl.deinit,
+            .negate = Impl.negate,
+            .expr = Impl.expr,
+        },
+    };
+    self.alloc = null;
+
+    return parent_pred;
+}
+
+test "Nary" {
+    const Edge = @import("./Edge.zig");
+    const Field = @import("./Field.zig");
+    const Value = @import("./Value.zig");
+
+    const alloc = EntAllocator.init(std.testing.allocator, .{});
+
+    const edge = Edge.init(alloc, "foo").expr();
+    const field = Field.init(alloc, "bar").expr();
+    const value = (try Value.init(alloc, "baz")).expr();
+
+    const nary = init(.Or, .{ edge, field, value });
+
+    var expected: []const u8 = "(foo || bar || \"baz\")";
+    var got = try nary.toString(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(expected, got);
+
+    std.testing.allocator.free(got);
+
+    const negated = nary.negate();
     defer negated.deinit();
 
-    const expected = "!((foo || bar || [1,2,3,4]))";
-    const got = try negated.toString(alloc);
-    defer alloc.free(got);
+    expected = "!((foo || bar || \"baz\"))";
+    got = try negated.toString(std.testing.allocator);
+    defer std.testing.allocator.free(got);
 
-    try strEq(expected, got);
+    try std.testing.expectEqualStrings(expected, got);
 }

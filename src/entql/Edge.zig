@@ -1,136 +1,114 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const Mutex = std.Thread.Mutex;
 
 const enums = @import("./enums.zig");
 const Op = enums.Op;
 const Func = enums.Func;
 
-const Expr = @import("./Expr.zig");
+const util = @import("util");
+const EntAllocator = util.EntAllocator;
 
-const Edge = @This();
+const Expr = @import("./Expr.zig");
+const Predicate = @import("./Predicate.zig");
+
+const Call = @import("./Call.zig");
+
+const Self = @This();
 
 name: []const u8,
-alloc: Allocator,
-mx: Mutex = Mutex{},
-freed: bool = false,
+alloc: ?*EntAllocator,
 
-pub fn init(alloc: Allocator, name: []const u8) Allocator.Error!Edge {
-    const name_clone = try alloc.dupe(u8, name);
-    errdefer alloc.free(name_clone);
+pub fn init(alloc: *EntAllocator, name: []const u8) *Self {
+    const dupe = alloc.dupe(u8, name);
 
-    return .{ .alloc = alloc, .name = name_clone };
+    const self = alloc.create(Self);
+    self.* = .{ .name = dupe, .alloc = alloc };
+
+    return self;
 }
 
-test "Edge.init" {
-    const alloc = std.testing.allocator;
-    const eqStr = std.testing.expectEqualStrings;
-    const eq = std.testing.expectEqual;
-    _ = eq;
-
-    var edge = try init(alloc, "foo");
-    defer edge.deinit();
-
-    try eqStr("foo", edge.name);
-}
-
-pub fn toString(self: *Edge, alloc: Allocator) Allocator.Error![]u8 {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
-        @panic("called Edge.toString after it was deinitialized");
-    }
-
-    return alloc.dupe(u8, self.name);
-}
-
-test "Edge.toString" {
-    const alloc = std.testing.allocator;
-    const eq = std.testing.expectEqualStrings;
-
-    var edge = try init(alloc, "foo");
-    defer edge.deinit();
-
-    const expected = "foo";
-    const got = try edge.toString(alloc);
-    defer alloc.free(got);
-
-    try eq(expected, got);
-}
-
-pub fn deinit(self: *Edge) void {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
+pub fn deinit(self: *Self) void {
+    if (self.alloc == null) {
         return;
     }
 
-    self.alloc.free(self.name);
-    self.freed = true;
+    self.alloc.?.deinit();
 }
 
-test "Edge.deinit" {
-    const alloc = std.testing.allocator;
+pub fn toString(self: *const Self, alloc: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    const name = try alloc.dupe(u8, self.name);
 
-    var edge = try init(alloc, "foo");
+    return name;
+}
 
-    const f = struct {
-        pub fn f(u: *Edge) void {
-            var xos = std.Random.DefaultPrng.init(blk: {
-                var seed: u64 = undefined;
-                std.posix.getrandom(std.mem.asBytes(&seed)) catch @panic("failed to get random seed");
-                break :blk seed;
-            });
-            const rng = xos.random();
+pub fn expr(self: *Self) *Expr {
+    std.debug.assert(self.alloc != null);
 
-            const ms = rng.uintLessThan(u64, 5000);
+    const Impl = struct {
+        pub fn toString(ptr: *anyopaque, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+            const f: *Self = @ptrCast(@alignCast(ptr));
 
-            std.time.sleep(std.time.ns_per_ms * ms);
-            u.deinit();
+            return Self.toString(f, alloc);
+        }
+
+        pub fn deinit(ptr: *anyopaque) void {
+            const v: *Self = @ptrCast(@alignCast(ptr));
+
+            return Self.deinit(v);
         }
     };
 
-    for (0..10) |_| {
-        const t = try std.Thread.spawn(.{}, f.f, .{&edge});
-        t.detach();
-    }
+    const parent_expr = self.alloc.?.create(Expr);
+    parent_expr.* = .{
+        .ptr = self,
+        .alloc = self.alloc,
+        .vt = &.{
+            .toString = Impl.toString,
+            .deinit = Impl.deinit,
+        },
+    };
+    self.alloc = null;
 
-    edge.deinit();
+    return parent_expr;
 }
 
-pub fn clone(self: *Edge, alloc: Allocator) Allocator.Error!*Edge {
-    self.mx.lock();
-    defer self.mx.unlock();
+pub fn exists(self: *Self) *Predicate {
+    const call = Call.init(.HasEdge, .{self.expr()});
 
-    if (self.freed) {
-        @panic("called Edge.clone after it was deinitialized");
-    }
-
-    const e = try alloc.create(Edge);
-    errdefer alloc.destroy(e);
-
-    const name = try alloc.dupe(u8, self.name);
-    errdefer alloc.free(name);
-
-    e.* = .{ .alloc = alloc, .name = name };
-
-    return e;
+    return call.pred();
 }
 
-test "Edge.clone" {
-    const alloc = std.testing.allocator;
-    const strEq = std.testing.expectEqualStrings;
-    const eq = std.testing.expectEqual;
-    _ = eq;
+pub inline fn existsWith(self: *Self, ps: anytype) *Predicate {
+    comptime {
+        const T = @TypeOf(ps);
+        const ti = @typeInfo(T);
 
-    var edge = try init(alloc, "foo");
-    defer edge.deinit();
+        if (ti != .Struct) {
+            @compileError("expected ps to be a tuple of *Predicate, but found " ++ @typeName(T) ++ " instead.");
+        }
 
-    var edge2 = try edge.clone(alloc);
-    defer alloc.destroy(edge2);
-    defer edge2.deinit();
+        if (!ti.Struct.is_tuple) {
+            @compileError("expected ps to be a tuple of *Predicate, but found " ++ @typeName(T) ++ " instead.");
+        }
 
-    try strEq(edge.name, edge2.name);
+        for (ti.Struct.fields) |field| {
+            if (field.type != *Predicate) {
+                @compileError("expected every element in ps to be a *Predicate, but found " ++ @typeName(field.type) ++ " instead.");
+            }
+        }
+    }
+
+    const types = [_]type{*Expr} ** (ps.len + 1);
+
+    const Tuple = std.meta.Tuple(types[0..]);
+    var tpl: Tuple = undefined;
+
+    tpl[0] = self.expr();
+
+    inline for (ps, 0..) |p, i| {
+        tpl[i + 1] = p.expr();
+    }
+
+    const call = Call.init(.HasEdge, tpl);
+
+    return call.pred();
 }

@@ -21,6 +21,10 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
 
+    lib_unit_tests.root_module.addAnonymousImport("util", .{
+        .root_source_file = b.path("src/util/util.zig"),
+    });
+
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
     // Similar to creating the run step earlier, this exposes a `test` step to

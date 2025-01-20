@@ -1,136 +1,212 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const Mutex = std.Thread.Mutex;
 
 const enums = @import("./enums.zig");
 const Op = enums.Op;
 const Func = enums.Func;
 
-const Expr = @import("./Expr.zig");
+const util = @import("util");
+const EntAllocator = util.EntAllocator;
 
-const Field = @This();
+const Expr = @import("./Expr.zig");
+const Predicate = @import("./Predicate.zig");
+
+const Value = @import("./Value.zig");
+const Binary = @import("./Binary.zig");
+const Call = @import("./Call.zig");
+
+const Self = @This();
 
 name: []const u8,
-alloc: Allocator,
-mx: Mutex = Mutex{},
-freed: bool = false,
+alloc: ?*EntAllocator,
 
-pub fn init(alloc: Allocator, name: []const u8) Allocator.Error!Field {
-    const name_clone = try alloc.dupe(u8, name);
-    errdefer alloc.free(name_clone);
+pub fn init(alloc: *EntAllocator, name: []const u8) *Self {
+    const dupe = alloc.dupe(u8, name);
 
-    return .{ .alloc = alloc, .name = name_clone };
+    const self = alloc.create(Self);
+    self.* = .{ .name = dupe, .alloc = alloc };
+
+    return self;
 }
 
-test "Field.init" {
-    const alloc = std.testing.allocator;
-    const eqStr = std.testing.expectEqualStrings;
-    const eq = std.testing.expectEqual;
-    _ = eq;
-
-    var field = try init(alloc, "foo");
-    defer field.deinit();
-
-    try eqStr("foo", field.name);
-}
-
-pub fn toString(self: *Field, alloc: Allocator) Allocator.Error![]u8 {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
-        @panic("called Field.toString after it was deinitialized");
-    }
-
-    return alloc.dupe(u8, self.name);
-}
-
-test "Field.toString" {
-    const alloc = std.testing.allocator;
-    const eq = std.testing.expectEqualStrings;
-
-    var field = try init(alloc, "foo");
-    defer field.deinit();
-
-    const expected = "foo";
-    const got = try field.toString(alloc);
-    defer alloc.free(got);
-
-    try eq(expected, got);
-}
-
-pub fn deinit(self: *Field) void {
-    self.mx.lock();
-    defer self.mx.unlock();
-
-    if (self.freed) {
+pub fn deinit(self: *Self) void {
+    if (self.alloc == null) {
         return;
     }
 
-    self.alloc.free(self.name);
-    self.freed = true;
+    self.alloc.?.deinit();
 }
 
-test "Field.deinit" {
-    const alloc = std.testing.allocator;
+pub fn toString(self: *const Self, alloc: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    const name = try alloc.dupe(u8, self.name);
 
-    var field = try init(alloc, "foo");
+    return name;
+}
 
-    const f = struct {
-        pub fn f(u: *Field) void {
-            var xos = std.Random.DefaultPrng.init(blk: {
-                var seed: u64 = undefined;
-                std.posix.getrandom(std.mem.asBytes(&seed)) catch @panic("failed to get random seed");
-                break :blk seed;
-            });
-            const rng = xos.random();
+pub fn expr(self: *Self) *Expr {
+    std.debug.assert(self.alloc != null);
 
-            const ms = rng.uintLessThan(u64, 5000);
+    const Impl = struct {
+        pub fn toString(ptr: *anyopaque, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+            const f: *Self = @ptrCast(@alignCast(ptr));
 
-            std.time.sleep(std.time.ns_per_ms * ms);
-            u.deinit();
+            return Self.toString(f, alloc);
+        }
+
+        pub fn deinit(ptr: *anyopaque) void {
+            const v: *Self = @ptrCast(@alignCast(ptr));
+
+            return Self.deinit(v);
         }
     };
 
-    for (0..10) |_| {
-        const t = try std.Thread.spawn(.{}, f.f, .{&field});
-        t.detach();
-    }
+    const parent_expr = self.alloc.?.create(Expr);
+    parent_expr.* = .{
+        .ptr = self,
+        .alloc = self.alloc,
+        .vt = &.{
+            .toString = Impl.toString,
+            .deinit = Impl.deinit,
+        },
+    };
+    self.alloc = null;
 
-    field.deinit();
+    return parent_expr;
 }
 
-pub fn clone(self: *Field, alloc: Allocator) Allocator.Error!*Field {
-    self.mx.lock();
-    defer self.mx.unlock();
+pub fn eq(self: *Self, v: anytype) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, v) catch unreachable;
+    std.debug.assert(val.alloc != null);
+    const binary = Binary.init(.Eq, self.expr(), val.expr());
+    std.debug.assert(binary.alloc != null);
+    std.debug.assert(val.alloc == null);
 
-    if (self.freed) {
-        @panic("called Field.clone after it was deinitialized");
-    }
+    const pred = binary.pred();
 
-    const f = try alloc.create(Field);
-    errdefer alloc.destroy(f);
+    std.debug.assert(pred.alloc != null);
+    std.debug.assert(binary.alloc == null);
+    std.debug.assert(val.alloc == null);
 
-    const name = try alloc.dupe(u8, self.name);
-    errdefer alloc.free(name);
-
-    f.* = .{ .alloc = alloc, .name = name };
-
-    return f;
+    return pred;
 }
 
-test "Field.clone" {
-    const alloc = std.testing.allocator;
-    const strEq = std.testing.expectEqualStrings;
-    const eq = std.testing.expectEqual;
-    _ = eq;
+pub fn neq(self: *Self, v: anytype) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, v) catch unreachable;
+    const binary = Binary.init(.Neq, self.expr(), val.expr());
 
-    var field = try init(alloc, "foo");
-    defer field.deinit();
+    return binary.pred();
+}
 
-    var field2 = try field.clone(alloc);
-    defer alloc.destroy(field2);
-    defer field2.deinit();
+pub fn gt(self: *Self, v: anytype) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, v) catch unreachable;
+    const binary = Binary.init(.Gt, self.expr(), val.expr());
 
-    try strEq(field.name, field2.name);
+    return binary.pred();
+}
+
+pub fn gte(self: *Self, v: anytype) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, v) catch unreachable;
+    const binary = Binary.init(.Gte, self.expr(), val.expr());
+
+    return binary.pred();
+}
+
+pub fn lt(self: *Self, v: anytype) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, v) catch unreachable;
+    const binary = Binary.init(.Lt, self.expr(), val.expr());
+
+    return binary.pred();
+}
+
+pub fn lte(self: *Self, v: anytype) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, v) catch unreachable;
+    const binary = Binary.init(.Lte, self.expr(), val.expr());
+
+    return binary.pred();
+}
+
+pub fn contains(self: *Self, substr: []const u8) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const v = Value.init(self.alloc.?, substr) catch unreachable;
+
+    const call = Call.init(.Contains, .{ self.expr(), v.expr() });
+
+    return call.pred();
+}
+
+pub fn containsFold(self: *Self, substr: []const u8) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const v = Value.init(self.alloc.?, substr) catch unreachable;
+
+    const call = Call.init(.ContainsFold, .{ self.expr(), v.expr() });
+
+    return call.pred();
+}
+
+pub fn equalFold(self: *Self, v: []const u8) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, v) catch unreachable;
+
+    const call = Call.init(.EqualFold, .{ self.expr(), val.expr() });
+
+    return call.pred();
+}
+
+pub fn hasPrefix(self: *Self, prefix: []const u8) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, prefix) catch unreachable;
+
+    const call = Call.init(.HasPrefix, .{ self.expr(), val.expr() });
+
+    return call.pred();
+}
+
+pub fn hasSuffix(self: *Self, suffix: []const u8) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, suffix) catch unreachable;
+
+    const call = Call.init(.HasSuffix, .{ self.expr(), val.expr() });
+
+    return call.pred();
+}
+
+pub fn in(self: *Self, vs: anytype) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, vs) catch unreachable.?;
+
+    const binary = Binary.init(.In, self.expr(), val.expr());
+
+    return binary.pred();
+}
+
+pub fn notIn(self: *Self, vs: anytype) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, vs) catch unreachable.?;
+
+    const binary = Binary.init(.NotIn, self.expr(), val.expr());
+
+    return binary.pred();
+}
+
+pub fn isNull(self: *Self) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, null) catch unreachable;
+
+    const binary = Binary.init(.Eq, self.expr(), val.expr());
+
+    return binary.pred();
+}
+
+pub fn isNotNull(self: *Self) *Predicate {
+    std.debug.assert(self.alloc != null);
+    const val = Value.init(self.alloc.?, null) catch unreachable;
+
+    const binary = Binary.init(.Neq, self.expr(), val.expr());
+
+    return binary.pred();
 }

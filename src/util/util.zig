@@ -1,3 +1,6 @@
+pub const EntAllocator = @import("./EntAllocator.zig");
+pub const mem = @import("./mem/mem.zig");
+
 // pub fn CustomStruct(comptime fields: []std.builtin.Type.StructField) type {
 //     return @Type(.{ .Struct = .{
 //         .layout = std.builtin.Type.ContainerLayout.auto,
