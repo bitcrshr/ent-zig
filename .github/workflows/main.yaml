@@ -40,7 +40,7 @@ jobs:
           tar xf ./zig-linux-x86_64-0.13.0.tar.xz ; \
       - name: Install GH dependencies
         if: ${{ !env.ACT }}
-        run: apt-get update && apt-get install xz-utils git -y
+        run: apt-get update && apt-get install xz-utils git curl jq gpg -y
       - name: Setup Zig Compiler
         uses: mlugg/setup-zig@v1.2.1
         if: ${{ !env.ACT }}          
